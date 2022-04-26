@@ -1,0 +1,153 @@
+---
+- name: Installing and Configuring OKIT
+  hosts: localhost
+  vars:
+    docker_version: "20.10.13"
+    docker_default: "20.10.13"
+  tasks:
+    - name: "Docker tasks"
+      block:
+        - name: installing docker with pip
+          pip:
+            name: docker
+            state: present
+            executable: pip3
+          register: pip_output
+
+        - name: Ensure docker and its dependencies are not installed
+          yum:
+            name: "{{ item }}"
+            state: absent
+          with_items:
+            - docker
+            - docker-client
+            - docker-client-latest
+            - docker-common
+            - docker-latest
+            - docker-latest-logrotate
+            - docker-logrotate
+            - docker-engine
+            - podman
+            - runc
+          tags: remove_old_version
+          register: docker_remove_output
+
+        - name: "Adding Docker repo"
+          shell:
+            cmd: sudo yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+          tags: add_repo
+          register: docker_repo_output
+
+        - name: "Installing Docker packages"
+          yum:
+            name: "{{ item }}"
+            state: present
+          loop:
+            - git
+            - yum-utils
+            - "docker-ce-{{ docker_version | default(docker_default) }}"
+            - "docker-ce-cli-{{ docker_version | default(docker_default) }}"
+          tags: install_packages
+          register: docker_install_output
+
+        - name: "Starting and Enabling Docker Service"
+          service:
+            name: docker
+            state: started
+            enabled: true
+          tags: start_service
+
+      when: (ansible_os_family == 'RedHat' or ansible_os_family == 'CentOS') and (ansible_distribution_version|int >= 8)
+      tags: docker_tasks
+
+      rescue:
+        - name: Error Occurred in Docker Installing Tasks
+          fail:
+            msg: "{{ item }}"
+          when: "item.failed == true"
+          with_items: "{{ docker_install_output.results }}"
+
+        - name: Error Occured in Docker removing Tasks
+          debug:
+            msg: "{{ item }}"
+          when: "item.failed == true"
+          with_items: "{{ docker_remove_output.results }}"
+
+        - name: Error Occured in docker pip install
+          debug:
+            msg: "{{ item }}"
+          when: "item.failed == true"
+          loop:
+            - "{{ pip_output }}"
+            - "{{ docker_repo_output }}"
+
+    - name: "Installing OCI-CLI"
+      yum:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - oraclelinux-developer-release-el8
+        - python36-oci-cli
+      tags: oci_cli_install
+
+    - name: "Cloning OKIT git repo"
+      git:
+        repo: 'https://github.com/oracle/oci-designer-toolkit.git'
+        dest: ~/oci-designer-toolkit
+        clone: yes
+        update: yes
+      tags: okit_git_repo
+
+    - name: "Creating Directory for Docker mount"
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+        owner: root
+        group: root
+      loop:
+          - "~/okit/user/templates"
+          - "~/okit_local_dir"
+      tags: okit_dirs
+
+    - name: "Build OKIT Docker Image"
+      docker_image:
+        name: okit
+        tag: latest
+        build:
+          path: ~/oci-designer-toolkit
+          dockerfile: ./containers/docker/Dockerfile
+        source: build
+        state: present
+      tags: build_okit_image
+
+    - name: "Check oci config is configured and ssh directory exists"
+      stat:
+        path: "{{ item }}"
+      loop:
+        - "~/.oci"
+        - "~/.ssh"
+      register: check_config_dirs
+      tags: check_configs
+
+    - name: "Test Config File .oci or .ssh"
+      fail:
+        msg: "Either .oci setup directory or .ssh directory doesn't exist, or both. Please configure it to avoid interruptions, and re-run playbook after configuring"
+      when: not item.stat.exists and item.stat.isdir
+      with_items: "{{ check_config_dirs.results }}"
+      tags: check_configs
+
+    - name: "Creating the OKIT Docker container"
+      docker_container:
+        name: okit
+        hostname: okit
+        image: okit:latest
+        volumes:
+          - ~/.oci:/root/.oci
+          - ~/.ssh:/root/.ssh
+          - ~/okit/user/templates:/okit/instance/templates/user
+          - ~/oci-designer-toolkit:/okit/instance/git
+          - ~/okit_local_dir:/okit/instance/local
+        ports:
+          - 80:80
+      tags: create_okit_container
