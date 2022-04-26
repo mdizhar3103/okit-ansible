@@ -4,6 +4,8 @@
   vars:
     docker_version: "20.10.13"
     docker_default: "20.10.13"
+    user_name: "root"
+    group_name: "root"
   tasks:
     - name: "Docker tasks"
       block:
@@ -103,8 +105,8 @@
         path: "{{ item }}"
         state: directory
         mode: "0755"
-        owner: root
-        group: root
+        owner: "{{ user_name | default("root") }}"
+        group: "{{ group_name | default("root") }}"
       loop:
           - "~/okit/user/templates"
           - "~/okit_local_dir"
